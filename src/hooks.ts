@@ -1,8 +1,10 @@
-import { BasicExampleFactory } from "./modules/examples";
+import { PdfXmlFactory } from "./modules/pdfXml";
 import { config } from "../package.json";
-import { getString, initLocale } from "./utils/locale";
+import { initLocale } from "./utils/locale";
 import { registerPrefsScripts } from "./modules/preferenceScript";
 import { createZToolkit } from "./utils/ztoolkit";
+
+const MENU_ID = `zotero-itemmenu-${config.addonRef}-write-pdf-xml`;
 
 async function onStartup() {
   await Promise.all([
@@ -12,40 +14,81 @@ async function onStartup() {
   ]);
   initLocale();
 
-  BasicExampleFactory.registerPrefs();
+  PdfXmlFactory.enable();
+  PdfXmlFactory.registerPrefs();
+  PdfXmlFactory.registerNotifier();
 
-  BasicExampleFactory.registerNotifier();
-
-  await onMainWindowLoad(window);
+  // `onStartup` runs once per session; register UI for every window that is
+  // already open, then rely on `onMainWindowLoad` for later windows.
+  for (const win of Zotero.getMainWindows()) {
+    if (win && !win.closed) {
+      await onMainWindowLoad(win as Window);
+    }
+  }
 }
 
+/**
+ * Called once per main window (including every re-open of the window).
+ * Registration must be idempotent: `onMainWindowLoad` can be reached both from
+ * `onStartup` and from the bootstrap window listener.
+ */
 async function onMainWindowLoad(win: Window): Promise<void> {
-  // Create ztoolkit for every window
-  const _ztoolkit = createZToolkit();
-  addon.data.ztoolkit = _ztoolkit;
-  _globalThis.ztoolkit = _ztoolkit;
+  const doc = win.document;
 
-  _ztoolkit.Menu.register("item", {
-    tag: "menuitem",
-    id: `zotero-itemmenu-${config.addonRef}-write-pdf-xml`,
-    label: "Write PDF XML",
-    icon: `chrome://${config.addonRef}/content/icons/favicon@0.5x.png`,
-    commandListener: () => {
-      const items = Zotero.getActiveZoteroPane().getSelectedItems();
-      const ids = items.map((item) => item.id);
-      if (ids.length > 0) {
-        BasicExampleFactory.writePdfXmlCallback(ids);
-      }
-    },
-  });
+  // Register the context menu item once per document.
+  if (!doc.getElementById(MENU_ID)) {
+    ztoolkit.Menu.register(
+      "item",
+      {
+        tag: "menuitem",
+        id: MENU_ID,
+        label: "Write PDF XML",
+        icon: `chrome://${config.addonRef}/content/icons/favicon@0.5x.png`,
+        commandListener: () => {
+          void onWritePdfXmlCommand(win);
+        },
+      },
+      "before",
+      (doc.querySelector("#zotero-itemmenu-separator") as XUL.Element) ??
+        undefined,
+    );
+  }
+}
+
+/**
+ * Context-menu handler: writes immediately for the current selection and
+ * reports the outcome, since the user explicitly asked for it.
+ */
+async function onWritePdfXmlCommand(win: Window) {
+  try {
+    const pane = (win as any).ZoteroPane ?? Zotero.getActiveZoteroPane();
+    const items = (pane?.getSelectedItems?.() ?? []) as Zotero.Item[];
+    if (!items.length) {
+      return;
+    }
+    const ids = items.map((item) => item.id);
+    await PdfXmlFactory.writeNow(ids);
+    PdfXmlFactory.notify([
+      { text: `Write PDF XML: processed ${ids.length} item(s)` },
+    ]);
+  } catch (e) {
+    Zotero.logError(e as Error);
+  }
 }
 
 async function onMainWindowUnload(win: Window): Promise<void> {
-  ztoolkit.unregisterAll();
+  // Only tear down this window's UI; `ztoolkit` is global to the addon and
+  // unregisterAll() here would strip the menu from the other windows too.
+  try {
+    win.document.getElementById(MENU_ID)?.remove();
+  } catch (e) {
+    // Window may already be gone.
+  }
   addon.data.dialog?.window?.close();
 }
 
 function onShutdown(): void {
+  PdfXmlFactory.unregisterNotifier();
   ztoolkit.unregisterAll();
   addon.data.dialog?.window?.close();
   // Remove addon object
@@ -54,8 +97,8 @@ function onShutdown(): void {
 }
 
 /**
- * This function is just an example of dispatcher for Notify events.
- * Any operations should be placed in a function to keep this funcion clear.
+ * Dispatcher for Notifier events. Keep this cheap: the PDF writing is queued
+ * and executed outside the notifier callback.
  */
 async function onNotify(
   event: string,
@@ -63,27 +106,13 @@ async function onNotify(
   ids: number[] | string[], //Array<number | string>,
   extraData: { [key: string]: any },
 ) {
-  // You can add your code to the corresponding notify type
-  ztoolkit.log("notify", event, type, ids, extraData);
-
-  // If event type is "item" and the event is "modify",
-  // iterate over all ids and retrieve the added/modified items as Item objects
   if (type === "item" && event === "modify") {
-    BasicExampleFactory.writePdfXmlCallback(ids);
-  } else if (
-    event == "select" &&
-    type == "tab" &&
-    extraData[ids[0]].type == "reader"
-  ) {
-    BasicExampleFactory.exampleNotifierCallback();
-  } else {
-    return;
+    PdfXmlFactory.queue(ids as number[]);
   }
 }
 
 /**
- * This function is just an example of dispatcher for Preference UI events.
- * Any operations should be placed in a function to keep this funcion clear.
+ * Dispatcher for Preference UI events.
  * @param type event type
  * @param data event data
  */

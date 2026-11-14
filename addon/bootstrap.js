@@ -1,8 +1,13 @@
 /**
- * Most of this code is from Zotero team's official Make It Red example[1]
- * or the Zotero 7 documentation[2].
- * [1] https://github.com/zotero/make-it-red
- * [2] https://www.zotero.org/support/dev/zotero_7_for_developers
+ * Bootstrap for Zotero 8, 9 and 10 (still loads on Zotero 7).
+ *
+ * Why this file was reworked:
+ * - Mozilla's JSMs became ES modules. `resource://gre/modules/Services.jsm` no
+ *   longer exists, and importing it throws — which used to abort `startup()`.
+ *   `Services` is now resolved defensively (global → .sys.mjs → legacy .jsm).
+ * - Every hook is wrapped so a failure is logged instead of thrown. A throwing
+ *   `startup()` makes Zotero treat the plugin as broken, which is one way a
+ *   plugin "disappears" after a restart.
  */
 
 if (typeof Zotero == "undefined") {
@@ -10,136 +15,238 @@ if (typeof Zotero == "undefined") {
 }
 
 var chromeHandle;
-
 var windowListener;
 
-// In Zotero 6, bootstrap methods are called before Zotero is initialized, and using include.js
-// to get the Zotero XPCOM service would risk breaking Zotero startup. Instead, wait for the main
-// Zotero window to open and get the Zotero object from there.
-//
-// In Zotero 7, bootstrap methods are not called until Zotero is initialized, and the 'Zotero' is
-// automatically made available.
-async function waitForZotero() {
-  await new Promise(async (resolve) => {
-    if (typeof Zotero != "undefined") {
-      resolve();
+/** Resolve the Services module across Zotero 7 / 8+ / 10. */
+function getServices() {
+  try {
+    if (typeof Services != "undefined") {
+      return Services;
     }
-
-    if (typeof Services == "undefined") {
-      var { Services } = ChromeUtils.import(
-        "resource://gre/modules/Services.jsm",
+  } catch (e) {
+    /* fall through */
+  }
+  try {
+    if (typeof ChromeUtils != "undefined" && ChromeUtils.importESModule) {
+      const mod = ChromeUtils.importESModule(
+        "resource://gre/modules/Services.sys.mjs",
       );
-    }
-    const windows = Services.wm.getEnumerator("navigator:browser");
-    let found = false;
-    while (windows.hasMoreElements()) {
-      let win = windows.getNext();
-      if (win.Zotero) {
-        Zotero = win.Zotero;
-        found = true;
-        resolve();
-        break;
+      if (mod?.Services) {
+        return mod.Services;
       }
     }
-    windowListener = {
-      onOpenWindow: function (aWindow) {
-        // Wait for the window to finish loading
-        const domWindow = aWindow
-          .QueryInterface(Ci.nsIInterfaceRequestor)
-          .getInterface(Ci.nsIDOMWindowInternal || Ci.nsIDOMWindow);
-        domWindow.addEventListener(
-          "load",
-          async function () {
-            domWindow.removeEventListener("load", arguments.callee, false);
-            if (!found && domWindow.Zotero) {
-              Zotero = domWindow.Zotero;
-              resolve();
-            } else if (
+  } catch (e) {
+    /* fall through */
+  }
+  try {
+    const mod = ChromeUtils.import("resource://gre/modules/Services.jsm");
+    if (mod?.Services) {
+      return mod.Services;
+    }
+  } catch (e) {
+    /* give up */
+  }
+  return undefined;
+}
+
+/**
+ * Resolve once the global `Zotero` object exists. Never rejects and never
+ * blocks startup for longer than a few seconds.
+ */
+async function waitForZotero() {
+  if (typeof Zotero != "undefined" && Zotero) {
+    return;
+  }
+  const Services = getServices();
+  await new Promise((resolve) => {
+    let resolved = false;
+    let timeout;
+    const finish = () => {
+      if (resolved) {
+        return;
+      }
+      resolved = true;
+      clearTimeout(timeout);
+      resolve();
+    };
+    // Never hang plugin startup waiting for a window.
+    timeout = setTimeout(finish, 5000);
+
+    try {
+      const wins = Services.wm.getEnumerator("navigator:browser");
+      while (wins.hasMoreElements()) {
+        const win = wins.getNext();
+        if (win && win.Zotero) {
+          Zotero = win.Zotero;
+          finish();
+          return;
+        }
+      }
+    } catch (e) {
+      Zotero?.debug?.(`[write-pdf-xml] window enumeration failed: ${e}`);
+    }
+
+    try {
+      windowListener = {
+        onOpenWindow: function (aWindow) {
+          let domWindow;
+          try {
+            domWindow = aWindow
+              .QueryInterface(Ci.nsIInterfaceRequestor)
+              .getInterface(Ci.nsIDOMWindow);
+          } catch (e) {
+            return;
+          }
+          domWindow.addEventListener(
+            "load",
+            async function onLoad() {
+              domWindow.removeEventListener("load", onLoad, false);
+              if (
+                (typeof Zotero == "undefined" || !Zotero) &&
+                domWindow.Zotero
+              ) {
+                Zotero = domWindow.Zotero;
+                finish();
+              } else if (
+                domWindow.location.href ===
+                "chrome://zotero/content/zoteroPane.xhtml"
+              ) {
+                // Only fires for windows re-opened after startup.
+                try {
+                  await Zotero?.__addonInstance__?.hooks?.onMainWindowLoad?.(
+                    domWindow,
+                  );
+                } catch (e) {
+                  Zotero?.logError?.(e);
+                }
+              }
+            },
+            false,
+          );
+        },
+        onCloseWindow: function (aWindow) {
+          try {
+            const domWindow = aWindow
+              .QueryInterface(Ci.nsIInterfaceRequestor)
+              .getInterface(Ci.nsIDOMWindow);
+            if (
               domWindow.location.href ===
               "chrome://zotero/content/zoteroPane.xhtml"
             ) {
-              // Call the hook for the main window load event
-              // Note that this is not called the first time the window is opened
-              // (when Zotero is initialized), but only when the window is re-opened
-              // after being closed
-              await Zotero.__addonInstance__?.hooks.onMainWindowLoad(domWindow);
+              Zotero?.__addonInstance__?.hooks?.onMainWindowUnload?.(domWindow);
             }
-          },
-          false,
-        );
-      },
-      onCloseWindow: function (aWindow) {
-        const domWindow = aWindow
-          .QueryInterface(Ci.nsIInterfaceRequestor)
-          .getInterface(Ci.nsIDOMWindowInternal || Ci.nsIDOMWindow);
-        if (
-          domWindow.location.href === "chrome://zotero/content/zoteroPane.xhtml"
-        ) {
-          Zotero.__addonInstance__?.hooks.onMainWindowUnload(domWindow);
-        }
-      },
-    };
-    Services.wm.addListener(windowListener);
+          } catch (e) {
+            Zotero?.logError?.(e);
+          }
+        },
+      };
+      Services.wm.addListener(windowListener);
+    } catch (e) {
+      Zotero?.debug?.(`[write-pdf-xml] window listener failed: ${e}`);
+      finish();
+    }
   });
 }
 
 function install(data, reason) {}
 
 async function startup({ id, version, resourceURI, rootURI }, reason) {
-  await waitForZotero();
-  await Zotero.initializationPromise;
+  const Services = getServices();
+  try {
+    await waitForZotero();
+    await Zotero.initializationPromise;
 
-  // String 'rootURI' introduced in Zotero 7
-  if (!rootURI) {
-    rootURI = resourceURI.spec;
+    // String 'rootURI' was introduced in Zotero 7
+    if (!rootURI) {
+      rootURI = resourceURI.spec;
+    }
+
+    if (!Services) {
+      throw new Error("Services module is unavailable");
+    }
+
+    const aomStartup = Components.classes[
+      "@mozilla.org/addons/addon-manager-startup;1"
+    ].getService(Components.interfaces.amIAddonManagerStartup);
+    const manifestURI = Services.io.newURI(rootURI + "manifest.json");
+    chromeHandle = aomStartup.registerChrome(manifestURI, [
+      ["content", "__addonRef__", rootURI + "chrome/content/"],
+    ]);
+
+    /**
+     * Globals for the plugin sandbox. `_globalThis` is its root object.
+     */
+    const ctx = {
+      rootURI,
+      Services,
+      Zotero,
+    };
+    ctx._globalThis = ctx;
+
+    Services.scriptloader.loadSubScript(
+      `${rootURI}/chrome/content/scripts/__addonRef__.js`,
+      ctx,
+    );
+  } catch (e) {
+    // Log instead of throwing: a throwing startup gets the addon disabled.
+    try {
+      Zotero?.logError?.(e);
+      Zotero?.debug?.(`[write-pdf-xml] startup failed: ${e}\n${e?.stack}`);
+    } catch (inner) {
+      /* nothing else we can do */
+    }
   }
-
-  var aomStartup = Components.classes[
-    "@mozilla.org/addons/addon-manager-startup;1"
-  ].getService(Components.interfaces.amIAddonManagerStartup);
-  var manifestURI = Services.io.newURI(rootURI + "manifest.json");
-  chromeHandle = aomStartup.registerChrome(manifestURI, [
-    ["content", "__addonRef__", rootURI + "chrome/content/"],
-  ]);
-
-  /**
-   * Global variables for plugin code.
-   * The `_globalThis` is the global root variable of the plugin sandbox environment
-   * and all child variables assigned to it is globally accessible.
-   * See `src/index.ts` for details.
-   */
-  const ctx = {
-    rootURI,
-  };
-  ctx._globalThis = ctx;
-
-  Services.scriptloader.loadSubScript(
-    `${rootURI}/chrome/content/scripts/__addonRef__.js`,
-    ctx,
-  );
 }
 
 function shutdown({ id, version, resourceURI, rootURI }, reason) {
   if (reason === APP_SHUTDOWN) {
     return;
   }
-  Services.wm.removeListener(windowListener);
-
-  if (typeof Zotero === "undefined") {
-    Zotero = Components.classes["@zotero.org/Zotero;1"].getService(
-      Components.interfaces.nsISupports,
-    ).wrappedJSObject;
+  const Services = getServices();
+  try {
+    if (windowListener) {
+      Services?.wm?.removeListener(windowListener);
+      windowListener = null;
+    }
+  } catch (e) {
+    /* listener may never have been added */
   }
-  Zotero.__addonInstance__.hooks.onShutdown();
 
-  Cc["@mozilla.org/intl/stringbundle;1"]
-    .getService(Components.interfaces.nsIStringBundleService)
-    .flushBundles();
+  try {
+    if (typeof Zotero == "undefined" || !Zotero) {
+      Zotero = Components.classes["@zotero.org/Zotero;1"].getService(
+        Components.interfaces.nsISupports,
+      ).wrappedJSObject;
+    }
+    Zotero?.__addonInstance__?.hooks?.onShutdown?.();
+  } catch (e) {
+    try {
+      Zotero?.logError?.(e);
+    } catch (inner) {
+      /* ignore */
+    }
+  }
 
-  Cu.unload(`${rootURI}/chrome/content/scripts/__addonRef__.js`);
+  try {
+    Cc["@mozilla.org/intl/stringbundle;1"]
+      .getService(Components.interfaces.nsIStringBundleService)
+      .flushBundles();
+  } catch (e) {
+    /* non-fatal */
+  }
+
+  try {
+    Cu.unload(`${rootURI}/chrome/content/scripts/__addonRef__.js`);
+  } catch (e) {
+    /* non-fatal */
+  }
 
   if (chromeHandle) {
-    chromeHandle.destruct();
+    try {
+      chromeHandle.destruct();
+    } catch (e) {
+      /* non-fatal */
+    }
     chromeHandle = null;
   }
 }
