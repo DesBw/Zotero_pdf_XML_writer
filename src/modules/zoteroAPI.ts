@@ -63,31 +63,32 @@ function getPrefsLabel(): string {
 /**
  * Small, non-blocking status notification.
  *
- * Uses Zotero's own ProgressWindow with an item-type icon. Zotero 8+ no longer
- * accepts arbitrary icon URLs there, but item types still map to built-in
- * icons, so this degrades gracefully across versions.
+ * Uses Zotero's own ProgressWindow. The public API is
+ * `changeHeadline` / `addLines` / `show`; there is no `createLine` method, so
+ * calling one threw and the status silently degraded to the debug log.
+ *
+ * A ProgressWindow whose main window is unavailable never finishes loading,
+ * which makes its methods queue forever; the headline still renders, so it is
+ * set first and every later call is best-effort.
  */
 export function notify(text: string) {
+  // The debug log is the durable record; always write it first.
+  try {
+    Zotero.debug(`${config.addonName}: ${text}`);
+  } catch (e) {
+    /* nothing to report to */
+  }
   try {
     const ProgressWindow = (Zotero as any).ProgressWindow as any;
     if (!ProgressWindow) {
-      Zotero.debug(`${config.addonName}: ${text}`);
       return;
     }
-    const win = new ProgressWindow({ closeOnClick: true, closeTime: 4000 });
+    const win = new ProgressWindow({ closeOnClick: true });
     win.changeHeadline?.(config.addonName);
-    win.createLine({
-      icon: "document",
-      text,
-    });
+    win.addLines?.(text, "document");
     win.show();
-    win.startCloseTimer?.(4000);
+    win.startCloseTimer?.(6000);
   } catch (e) {
     // Notification failures must never affect the actual work.
-    try {
-      Zotero.debug(`${config.addonName}: ${text}`);
-    } catch (inner) {
-      /* ignore */
-    }
   }
 }

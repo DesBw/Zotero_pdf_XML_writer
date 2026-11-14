@@ -28,7 +28,10 @@ interface Report {
   noFile: number;
   encrypted: number;
   failed: number;
+  /** Hard failures, shown in the summary. */
   errors: string[];
+  /** Non-fatal reasons a PDF was skipped (missing file, not downloaded). */
+  notes: string[];
 }
 
 const emptyReport = (): Report => ({
@@ -39,6 +42,7 @@ const emptyReport = (): Report => ({
   encrypted: 0,
   failed: 0,
   errors: [],
+  notes: [],
 });
 
 /**
@@ -130,14 +134,41 @@ export class PdfXmlFactory {
       Zotero.debug(`${config.addonName}: auto-write disabled, ignoring`);
       return;
     }
+    let queued = 0;
     for (const id of ids) {
-      // Attachment/note ids are dropped early: only parents have metadata and
-      // this also prevents our own file write from feeding back into the queue.
       const item = Zotero.Items.get(id);
-      if (!item || !item.isRegularItem()) {
+      if (!item) {
         continue;
       }
-      this.pending.add(id);
+      if (item.isRegularItem()) {
+        this.pending.add(id);
+        queued++;
+        continue;
+      }
+      if (item.isAttachment?.() && this.isPDF(item)) {
+        if (!item.parentID) {
+          // A standalone PDF has its own title/author.
+          this.pending.add(id);
+          queued++;
+          continue;
+        }
+        Zotero.debug(
+          `${config.addonName}: attachment ${id} changed; its PDF is written from parent ${item.parentID}, not from the attachment`,
+        );
+        continue;
+      }
+      Zotero.debug(
+        `${config.addonName}: notify for ${id} ignored (${
+          item.isAttachment?.()
+            ? "non-PDF attachment"
+            : "not an item with metadata"
+        })`,
+      );
+    }
+    if (!queued) {
+      Zotero.debug(
+        `${config.addonName}: nothing queued from this notification`,
+      );
     }
     this.scheduleFlush();
   }
@@ -160,8 +191,16 @@ export class PdfXmlFactory {
     this.stopping = false;
   }
 
-  /** Explicit entry point used by the menu; bypasses the debounce. */
-  static async writeNow(ids: number[]): Promise<Report> {
+  /**
+   * Explicit entry point used by the menu; bypasses the debounce.
+   *
+   * `attachmentIds` carries PDFs the user selected directly. They have no
+   * metadata of their own, so they are written using their parent's fields.
+   */
+  static async writeNow(
+    ids: number[],
+    attachmentIds: number[] = [],
+  ): Promise<Report> {
     if (this.timer !== undefined) {
       clearTimeout(this.timer);
       this.timer = undefined;
@@ -170,7 +209,7 @@ export class PdfXmlFactory {
     for (const id of ids) {
       this.pending.delete(id);
     }
-    return this.run(ids);
+    return this.run(ids, attachmentIds);
   }
 
   static cancelPending() {
@@ -192,16 +231,19 @@ export class PdfXmlFactory {
     const report = await this.run(ids);
     // Automatic writes stay quiet unless something went wrong.
     if (report.failed && report.errors.length) {
-      notify(`Write PDF XML failed: ${report.errors[0]}`);
+      notify(`write failed: ${report.errors[0]}`);
     } else if (report.written) {
       Zotero.debug(`${config.addonName}: auto-wrote ${report.written} PDF(s)`);
     }
     this.scheduleFlush();
   }
 
-  private static async run(ids: number[]): Promise<Report> {
+  private static async run(
+    ids: number[],
+    attachmentIds: number[] = [],
+  ): Promise<Report> {
     const report = emptyReport();
-    if (!ids.length || this.stopping) {
+    if ((!ids.length && !attachmentIds.length) || this.stopping) {
       return report;
     }
     if (this.running) {
@@ -213,7 +255,10 @@ export class PdfXmlFactory {
     }
     this.running = true;
     try {
-      const items = await Zotero.Items.getAsync(ids);
+      if (attachmentIds.length) {
+        await this.writeSelection(attachmentIds, report);
+      }
+      const items = ids.length ? await Zotero.Items.getAsync(ids) : [];
       for (const item of items) {
         if (this.stopping) {
           break;
@@ -242,6 +287,46 @@ export class PdfXmlFactory {
       );
     }
     return report;
+  }
+
+  /**
+   * Write PDFs the user selected directly, using their parent item's fields.
+   * A top-level (standalone) attachment is written from its own fields.
+   */
+  private static async writeSelection(
+    attachmentIds: number[],
+    report: Report,
+  ): Promise<void> {
+    const attachments = await Zotero.Items.getAsync(attachmentIds);
+    for (const att of attachments) {
+      if (this.stopping) {
+        return;
+      }
+      if (!att || !att.isAttachment?.()) {
+        continue;
+      }
+      if (att.attachmentContentType !== "application/pdf") {
+        Zotero.debug(
+          `${config.addonName}: selection ${att.id} is not a PDF (${att.attachmentContentType})`,
+        );
+        this.count(report, "no-attachment");
+        continue;
+      }
+      const parent = att.parentID ? Zotero.Items.get(att.parentID) : null;
+      const source = parent ?? att;
+      const title = String(source.getField?.("title") ?? "").trim();
+      const author = String(source.getField?.("firstCreator") ?? "").trim();
+      Zotero.debug(
+        `${config.addonName}: direct selection ${att.id} from ${
+          parent ? `parent ${parent.id}` : "the file's own fields"
+        }`,
+      );
+      this.count(
+        report,
+        await this.writeAttachment(att, title, author, report),
+      );
+      await Zotero.Promise.delay(0);
+    }
   }
 
   private static count(report: Report, result: Result) {
@@ -304,6 +389,17 @@ export class PdfXmlFactory {
           att.attachmentContentType === "application/pdf"),
     );
     if (!pdfs.length) {
+      Zotero.debug(
+        `${config.addonName}: item ${item.id} has ${
+          attachments.length
+        } attachment(s), none of them PDFs${
+          attachments.length
+            ? ` (${attachments
+                .map((a) => a.attachmentContentType || "unknown")
+                .join(", ")})`
+            : ""
+        }`,
+      );
       return "no-attachment";
     }
 
@@ -333,10 +429,13 @@ export class PdfXmlFactory {
       return "failed";
     }
     if (!path) {
-      // Stored-but-not-downloaded, or a linked file that moved.
-      Zotero.debug(
-        `${config.addonName}: attachment ${att.id} has no local file`,
-      );
+      // getFilePathAsync() gives no reason for a linked file, so work it out.
+      path = await this.resolveLinkedPath(att);
+    }
+    if (!path) {
+      const reason = this.describeMissingFile(att);
+      report.notes.push(reason);
+      Zotero.debug(`${config.addonName}: ${reason}`);
       return "no-file";
     }
 
@@ -358,12 +457,21 @@ export class PdfXmlFactory {
 
     const currentTitle = (pdfDoc.getTitle() ?? "").trim();
     const currentAuthor = (pdfDoc.getAuthor() ?? "").trim();
-    if (
-      (!title || currentTitle === title) &&
-      (!author || currentAuthor === author)
-    ) {
+    const titleMatches = !title || currentTitle === title;
+    const authorMatches = !author || currentAuthor === author;
+    if (titleMatches && authorMatches) {
+      Zotero.debug(
+        `${config.addonName}: attachment ${att.id} already has title/author matching the item`,
+      );
       return "unchanged";
     }
+    Zotero.debug(
+      `${config.addonName}: attachment ${att.id} title ${JSON.stringify(
+        currentTitle,
+      )} -> ${JSON.stringify(title)}, author ${JSON.stringify(
+        currentAuthor,
+      )} -> ${JSON.stringify(author)}`,
+    );
 
     try {
       if (title) {
@@ -381,6 +489,145 @@ export class PdfXmlFactory {
       Zotero.logError(e as Error);
       return "failed";
     }
+  }
+
+  /* ------------------------------------------------------------------ *
+   * Linked-file resolution
+   * ------------------------------------------------------------------ */
+
+  /** True when the attachment is a PDF. */
+  private static isPDF(item: Zotero.Item): boolean {
+    return Boolean(
+      item?.isPDFAttachment?.() ||
+        item?.attachmentContentType === "application/pdf",
+    );
+  }
+
+  /** Short, human-readable reason a PDF could not be reached. */
+  private static describeMissingFile(att: Zotero.Item): string {
+    const attachments = (Zotero as any).Attachments;
+    const linkedFile = attachments?.LINK_MODE_LINKED_FILE ?? 2;
+    const placeholder = attachments?.BASE_PATH_PLACEHOLDER ?? "attachments:";
+    const rawPath = String(att.attachmentPath ?? "");
+    if (att.attachmentLinkMode === linkedFile) {
+      if (rawPath.startsWith(placeholder)) {
+        let basePath = "";
+        try {
+          basePath = String(Zotero.Prefs.get("baseAttachmentPath") ?? "");
+        } catch (e) {
+          basePath = "";
+        }
+        return basePath
+          ? `linked file not found under the base directory (${basePath})`
+          : "linked file uses the base directory, which is not set";
+      }
+      return `linked file not found (${rawPath || "no path stored"})`;
+    }
+    return "attachment is not downloaded yet";
+  }
+
+  /**
+   * Work out where a linked attachment actually lives, and say why when it
+   * cannot be found.
+   *
+   * `getFilePathAsync()` collapses every linked-file problem into `false` —
+   * no base directory, a stale relative path, a moved file — and only logs a
+   * `Zotero.debug(..., 2)` that is invisible at default verbosity. Since a
+   * library of linked PDFs is the common case, each step is retried here and
+   * the specific reason is logged.
+   */
+  private static async resolveLinkedPath(
+    att: Zotero.Item,
+  ): Promise<string | undefined> {
+    const linkMode = att.attachmentLinkMode;
+    const rawPath = String(att.attachmentPath ?? "");
+    const attachments = (Zotero as any).Attachments;
+    const linkedFile = attachments?.LINK_MODE_LINKED_FILE ?? 2;
+    const linkedURL = attachments?.LINK_MODE_LINKED_URL ?? 3;
+    const label = `${config.addonName}: attachment ${
+      att.id
+    } (linkMode ${linkMode}, path ${JSON.stringify(rawPath)})`;
+
+    if (linkMode === linkedURL) {
+      Zotero.debug(`${label}: linked URL, there is no file to write`);
+      return undefined;
+    }
+    if (!rawPath) {
+      Zotero.debug(`${label}: attachment has no stored path`);
+      return undefined;
+    }
+
+    const candidates: string[] = [];
+    const placeholder = attachments?.BASE_PATH_PLACEHOLDER ?? "attachments:";
+    if (rawPath.startsWith(placeholder)) {
+      let basePath: string | undefined;
+      try {
+        basePath = String(Zotero.Prefs.get("baseAttachmentPath") ?? "");
+      } catch (e) {
+        basePath = "";
+      }
+      if (!basePath) {
+        Zotero.debug(
+          `${label}: uses the relative base directory, but no "Linked Attachment Base Directory" is set in Zotero's preferences`,
+        );
+      } else {
+        const relative = rawPath.slice(placeholder.length);
+        Zotero.debug(`${label}: relative to base directory ${basePath}`);
+        try {
+          const resolved = attachments?.resolveRelativePath?.(rawPath);
+          if (resolved) {
+            candidates.push(resolved);
+          }
+        } catch (e) {
+          /* fall through to the manual join below */
+        }
+        const sep =
+          basePath.includes("\\") || /^[A-Za-z]:/.test(basePath) ? "\\" : "/";
+        const trimmed = basePath.replace(/[\\/]+$/, "");
+        candidates.push(
+          `${trimmed}${sep}${relative
+            .replace(/^[\\/]+/, "")
+            .replace(/[\\/]+/g, sep)}`,
+        );
+      }
+    } else if (linkMode === linkedFile) {
+      // A plain absolute path for a linked file.
+      candidates.push(rawPath);
+    }
+
+    if (!candidates.length) {
+      Zotero.debug(`${label}: could not build any candidate path`);
+      return undefined;
+    }
+
+    let io: any;
+    try {
+      io = this.getIOUtils();
+    } catch (e) {
+      io = undefined;
+    }
+    for (const candidate of candidates) {
+      let exists = false;
+      try {
+        if (io?.exists) {
+          exists = await io.exists(candidate);
+        } else {
+          // No IOUtils: let the read itself be the test.
+          exists = true;
+        }
+      } catch (e) {
+        exists = false;
+      }
+      if (exists) {
+        Zotero.debug(`${label}: resolved to ${candidate}`);
+        return candidate;
+      }
+      Zotero.debug(`${label}: not found at ${candidate}`);
+    }
+    Zotero.debug(
+      `${label}: the file is missing — for a linked attachment, this usually means it was moved, renamed or deleted outside Zotero`,
+    );
+    return undefined;
   }
 
   /* ------------------------------------------------------------------ *
@@ -484,6 +731,10 @@ export class PdfXmlFactory {
     const summary = parts.join(", ");
     if (report.errors.length) {
       return `${summary} — ${report.errors[0]}`;
+    }
+    if (!report.written && report.notes.length) {
+      // Nothing was written: the reason matters more than the counts.
+      return `${summary} — ${report.notes[0]}`;
     }
     return summary;
   }

@@ -56,7 +56,13 @@ linked files, and files that are only available locally through sync.
 - Writing happens outside Zotero's notification callbacks, one item at a time,
   and the main thread is yielded between items. Large batches therefore do not
   freeze the UI.
-- Encrypted PDFs are skipped.
+- Encrypted PDFs are skipped, and reported as such — publisher PDFs usually
+  carry an `/Encrypt` dictionary, and their metadata cannot be rewritten by any
+  tool of this kind.
+- Selecting the **PDF row** itself works: the write then uses its parent item's
+  Title/Author. Selecting a note or snapshot row does not.
+- Every run reports what happened, and every skipped PDF says why. If nothing
+  appears to happen, see [docs/diagnose.md](docs/diagnose.md).
 
 ### Settings
 

@@ -137,7 +137,11 @@ function applyMenuState(context: any, mode: "item" | "tools") {
   try {
     context?.menuElem?.setAttribute("label", menuLabel());
     if (mode === "item") {
-      const usable = selectedRegularItems(context?.items).length > 0;
+      // A selected PDF row is a valid target too (its parent is used), so the
+      // entry must not be hidden just because no parent row is selected.
+      const targets = resolveTargets(context?.items);
+      const usable =
+        targets.parentIds.length > 0 || targets.attachmentIds.length > 0;
       context?.setEnabled?.(usable);
       context?.setVisible?.(usable);
     }
@@ -182,6 +186,50 @@ function selectedRegularItems(items: unknown): Zotero.Item[] {
 }
 
 /**
+ * Map a selection to the parent items that own metadata.
+ *
+ * Selecting the PDF attachment row is a natural thing to do — the file is
+ * literally what gets written — but an attachment has no Title/Author of its
+ * own. Such ids are mapped to their parent so the menu still works, and are
+ * kept separately so they can still be written by the "all" command.
+ */
+function resolveTargets(items: unknown): {
+  parentIds: number[];
+  attachmentIds: number[];
+} {
+  const parentIds: number[] = [];
+  const attachmentIds: number[] = [];
+  if (!Array.isArray(items)) {
+    return { parentIds, attachmentIds };
+  }
+  const pushUnique = (list: number[], id: number) => {
+    if (Number.isFinite(id) && !list.includes(id)) {
+      list.push(id);
+    }
+  };
+  for (const item of items as Zotero.Item[]) {
+    if (!item || item.deleted) {
+      continue;
+    }
+    if (item.isRegularItem?.()) {
+      pushUnique(parentIds, item.id);
+      continue;
+    }
+    if (item.isAttachment?.()) {
+      pushUnique(attachmentIds, item.id);
+      const parentID = item.parentID;
+      if (parentID) {
+        const parent = Zotero.Items.get(parentID);
+        if (parent && parent.isRegularItem()) {
+          pushUnique(parentIds, parent.id);
+        }
+      }
+    }
+  }
+  return { parentIds, attachmentIds };
+}
+
+/**
  * Called once per main window (including every re-open of the window) by the
  * bootstrap window listener. Only needed for the legacy menu path.
  */
@@ -197,24 +245,27 @@ async function onMainWindowLoad(win: Window): Promise<void> {
  */
 async function onWritePdfXmlCommand(items?: Zotero.Item[]) {
   try {
-    let selection = selectedRegularItems(items);
-    if (!selection.length) {
+    let targets = resolveTargets(items);
+    if (!targets.parentIds.length && !targets.attachmentIds.length) {
       // Fall back to the pane selection (legacy path/entry points).
-      const pane = Zotero.getActiveZoteroPane();
-      selection = selectedRegularItems(pane?.getSelectedItems?.());
+      targets = resolveTargets(
+        Zotero.getActiveZoteroPane()?.getSelectedItems?.(),
+      );
     }
-    if (!selection.length) {
+    const { parentIds, attachmentIds } = targets;
+    Zotero.debug(
+      `${config.addonName}: menu command on ${parentIds.length} item(s) ` +
+        `[${parentIds.join(",")}] and ${attachmentIds.length} selected ` +
+        `PDF(s) [${attachmentIds.join(",")}]`,
+    );
+    if (!parentIds.length && !attachmentIds.length) {
+      notify("select one or more items first");
       return;
     }
-    const ids = selection.map((item) => item.id);
-    Zotero.debug(
-      `${config.addonName}: menu command on ${ids.length} item(s): ${ids.join(
-        ",",
-      )}`,
-    );
-    const report = await PdfXmlFactory.writeNow(ids);
-    notify(`Write PDF XML: ${PdfXmlFactory.summarize(report)}`);
+    const report = await PdfXmlFactory.writeNow(parentIds, attachmentIds);
+    notify(PdfXmlFactory.summarize(report));
   } catch (e) {
+    notify(`write failed: ${(e as Error)?.message ?? e}`);
     Zotero.logError(e as Error);
   }
 }
