@@ -1,15 +1,15 @@
 {
   "name": "zotero-pdf-metadata",
-  "version": "0.5.6",
-  "description": "Zotero Addon",
+  "version": "0.6.0",
+  "description": "Writes Zotero item metadata into the XML metadata of attached PDFs",
   "config": {
     "addonName": "Write PDF XML",
     "addonID": "zoteropdfmetadata@gmail.com",
     "addonRef": "pdf_xml",
     "addonInstance": "PDFXml",
     "prefsPrefix": "extensions.zotero.pdf_xml",
-    "releasepage": "https://github.com/franzbischoff/zotero-pdf-metadata/releases/latest/download/zotero-pdf-metadata.xpi",
-    "updaterdf": "https://raw.githubusercontent.com/franzbischoff/zotero-pdf-metadata/main/update.json"
+    "releasepage": "https://github.com/DesBw/write_xml_metadata_to_PDF/releases/latest/download/zotero-pdf-metadata.xpi",
+    "updaterdf": "https://raw.githubusercontent.com/DesBw/write_xml_metadata_to_PDF/main/update.json"
   },
   "main": "src/index.ts",
   "scripts": {

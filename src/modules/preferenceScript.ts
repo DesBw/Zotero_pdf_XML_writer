@@ -1,44 +1,58 @@
 import { config } from "../../package.json";
 
-export async function registerPrefsScripts(_window: Window) {
-  // This function is called when the prefs window is opened
-  // See addon/chrome/content/preferences.xul onpaneload
-
-  updatePrefsUI();
-  bindPrefEvents();
+/**
+ * Called when the preferences pane is loaded.
+ * See addon/chrome/content/preferences.xhtml onload.
+ */
+export async function registerPrefsScripts(win: Window) {
+  if (!win?.document.getElementById(`zotero-prefpane-${config.addonRef}`)) {
+    return;
+  }
+  bindPrefEvents(win);
+  syncPrefsUI(win);
 }
 
-async function updatePrefsUI() {
-  // You can initialize some UI elements on prefs window
-  // with addon.data.prefs.window.document
-  // Or bind some events to the elements
-  const renderLock = ztoolkit.getGlobal("Zotero").Promise.defer();
-  if (addon.data.prefs?.window == undefined) return;
+const AUTO_WRITE_PREF = `${config.prefsPrefix}.autoWrite`;
+const DEBOUNCE_PREF = `${config.prefsPrefix}.debounceMs`;
 
-  await renderLock.promise;
-  ztoolkit.log("Preference table rendered!");
+function syncPrefsUI(win: Window) {
+  const doc = win.document;
+
+  const autoWrite = doc.getElementById(
+    `zotero-prefpane-${config.addonRef}-auto-write`,
+  ) as XUL.Checkbox | null;
+  if (autoWrite) {
+    const value = Zotero.Prefs.get(AUTO_WRITE_PREF, true);
+    autoWrite.checked = value === undefined ? true : Boolean(value);
+  }
+
+  const debounce = doc.getElementById(
+    `zotero-prefpane-${config.addonRef}-debounce`,
+  ) as HTMLInputElement | null;
+  if (debounce) {
+    const value = Zotero.Prefs.get(DEBOUNCE_PREF, true);
+    debounce.value = String(value ?? 1500);
+  }
 }
 
-function bindPrefEvents() {
-  addon.data
-    .prefs!.window.document.querySelector(
-      `#zotero-prefpane-${config.addonRef}-enable`,
-    )
+function bindPrefEvents(win: Window) {
+  const doc = win.document;
+
+  doc
+    .getElementById(`zotero-prefpane-${config.addonRef}-auto-write`)
     ?.addEventListener("command", (e) => {
-      ztoolkit.log(e);
-      addon.data.prefs!.window.alert(
-        `Successfully changed to ${(e.target as XUL.Checkbox).checked}!`,
-      );
+      const checkbox = e.target as XUL.Checkbox;
+      Zotero.Prefs.set(AUTO_WRITE_PREF, Boolean(checkbox.checked), true);
     });
 
-  addon.data
-    .prefs!.window.document.querySelector(
-      `#zotero-prefpane-${config.addonRef}-input`,
-    )
+  doc
+    .getElementById(`zotero-prefpane-${config.addonRef}-debounce`)
     ?.addEventListener("change", (e) => {
-      ztoolkit.log(e);
-      addon.data.prefs!.window.alert(
-        `Successfully changed to ${(e.target as HTMLInputElement).value}!`,
-      );
+      const input = e.target as HTMLInputElement;
+      const value = Number(input.value);
+      // Guard against empty / negative / non-numeric input.
+      const safe = Number.isFinite(value) && value >= 0 ? value : 1500;
+      input.value = String(safe);
+      Zotero.Prefs.set(DEBOUNCE_PREF, safe, true);
     });
 }
