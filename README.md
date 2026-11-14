@@ -42,7 +42,8 @@ The plugin then updates the `Title` and `Author` fields of the PDF's XML
 metadata (the PDF Info dictionary), triggered by a change to the reference entry.
 
 You can also write the XML by hand: select one or more items in the items list,
-right-click and choose **Write PDF XML**. That works on stored attachments,
+right-click and choose **Write PDF XML** (also available under **Tools → Write
+PDF XML**). That works on stored attachments,
 linked files, and files that are only available locally through sync.
 
 #### Behaviour worth knowing
