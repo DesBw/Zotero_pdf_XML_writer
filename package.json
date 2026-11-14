@@ -1,6 +1,6 @@
 {
   "name": "zotero-pdf-xml",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "Writes Zotero item metadata into the XML metadata of attached PDFs",
   "config": {
     "addonName": "Write PDF XML",

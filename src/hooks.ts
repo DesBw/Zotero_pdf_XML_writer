@@ -2,7 +2,7 @@ import { PdfXmlFactory } from "./modules/pdfXml";
 import { config } from "../package.json";
 import { getString, initLocale } from "./utils/locale";
 import { registerPrefsScripts } from "./modules/preferenceScript";
-import { registerPrefs } from "./modules/zoteroAPI";
+import { notify, registerPrefs } from "./modules/zoteroAPI";
 
 /** Id used for the official Zotero 8+ menu API. */
 const MENU_ID = `${config.addonRef}-write-pdf-xml`;
@@ -207,10 +207,13 @@ async function onWritePdfXmlCommand(items?: Zotero.Item[]) {
       return;
     }
     const ids = selection.map((item) => item.id);
-    await PdfXmlFactory.writeNow(ids);
-    PdfXmlFactory.notify([
-      { text: `Write PDF XML: processed ${ids.length} item(s)` },
-    ]);
+    Zotero.debug(
+      `${config.addonName}: menu command on ${ids.length} item(s): ${ids.join(
+        ",",
+      )}`,
+    );
+    const report = await PdfXmlFactory.writeNow(ids);
+    notify(`Write PDF XML: ${PdfXmlFactory.summarize(report)}`);
   } catch (e) {
     Zotero.logError(e as Error);
   }

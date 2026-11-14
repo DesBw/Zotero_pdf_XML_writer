@@ -4,42 +4,64 @@ import { notify } from "./zoteroAPI";
 
 /**
  * Default coalescing window. Zotero emits several `item` `modify`
- * notifications for a single metadata edit (and one per field), so raw events
- * are coalesced per item before any PDF is touched.
+ * notifications for a single metadata edit, so raw events are coalesced per
+ * item before any PDF is touched.
  */
 const DEFAULT_DEBOUNCE_MS = 1500;
 
 /** Hard cap of items handled per flush, so a huge batch stays interruptible. */
 const MAX_BATCH = 200;
 
-type ProgressLine = { text: string };
+/** Per-item outcome, reported to the user so nothing fails silently. */
+type Result =
+  | "written"
+  | "unchanged"
+  | "no-attachment"
+  | "no-file"
+  | "encrypted"
+  | "failed";
+
+interface Report {
+  written: number;
+  unchanged: number;
+  noAttachment: number;
+  noFile: number;
+  encrypted: number;
+  failed: number;
+  errors: string[];
+}
+
+const emptyReport = (): Report => ({
+  written: 0,
+  unchanged: 0,
+  noAttachment: 0,
+  noFile: 0,
+  encrypted: 0,
+  failed: 0,
+  errors: [],
+});
 
 /**
  * Writes the parent item's Title/Author into the XML metadata (Info
  * dictionary) of its PDF attachments.
  *
- * Design notes (why this is not a straight loop in the notifier):
- * - Zotero awaits notifier callbacks, so doing file I/O there stalls the UI and
- *   item saving. Notification handling here only *queues* ids and returns.
- * - One worker at a time, with a yield between items, keeps the app responsive.
- * - Files whose Title/Author already match are not rewritten at all.
+ * - The notifier only queues ids; file I/O never blocks item saving.
+ * - One worker at a time, yielding between items, keeps the UI responsive.
+ * - PDFs whose Title/Author already match are not rewritten.
  */
 export class PdfXmlFactory {
   private static notifierID: string | undefined;
   private static pending = new Set<number>();
   private static timer: ReturnType<typeof setTimeout> | undefined;
   private static running = false;
-  /** True once shutdown started; in-flight work stops at the next item. */
   private static stopping = false;
+  /** Number of times the notifier fired, for diagnostics. */
+  private static notifyCount = 0;
 
   /* ------------------------------------------------------------------ *
    * Wiring
    * ------------------------------------------------------------------ */
 
-  /**
-   * Register the item observer. The callback is intentionally synchronous and
-   * cheap: it only enqueues ids.
-   */
   static registerNotifier() {
     if (this.notifierID) {
       return;
@@ -58,15 +80,20 @@ export class PdfXmlFactory {
           if (type !== "item" || event !== "modify") {
             return;
           }
-          // `extraData` is unused, but keeping the signature complete avoids
-          // breaking on future Zotero versions that pass extra keys.
           void extraData;
           const itemIDs = (ids as (number | string)[])
             .map((id) => Number(id))
             .filter((id) => Number.isFinite(id));
-          if (itemIDs.length) {
-            this.queue(itemIDs);
+          if (!itemIDs.length) {
+            return;
           }
+          this.notifyCount++;
+          Zotero.debug(
+            `${config.addonName}: notify #${
+              this.notifyCount
+            } modify item ${itemIDs.join(",")}`,
+          );
+          this.queue(itemIDs);
         } catch (e) {
           Zotero.logError(e as Error);
         }
@@ -76,6 +103,11 @@ export class PdfXmlFactory {
       callback,
       ["item"],
       config.addonRef,
+    );
+    Zotero.debug(
+      `${config.addonName}: notifier registered (${
+        this.notifierID
+      }), auto-write ${this.isAutoWriteEnabled() ? "on" : "off"}`,
     );
   }
 
@@ -95,13 +127,13 @@ export class PdfXmlFactory {
   /** Debounced entry point used by the notifier. */
   static queue(ids: number[]) {
     if (!this.isAutoWriteEnabled()) {
+      Zotero.debug(`${config.addonName}: auto-write disabled, ignoring`);
       return;
     }
     for (const id of ids) {
-      // Only parent items are interesting. Attachments, notes and annotations
-      // are dropped here (cheaply, from the item cache) so that a file change
-      // caused by our own write can never feed back into the queue.
-      const item = Zotero.Items.get(id as number);
+      // Attachment/note ids are dropped early: only parents have metadata and
+      // this also prevents our own file write from feeding back into the queue.
+      const item = Zotero.Items.get(id);
       if (!item || !item.isRegularItem()) {
         continue;
       }
@@ -128,21 +160,17 @@ export class PdfXmlFactory {
     this.stopping = false;
   }
 
-  /** Explicit entry point used by the context menu; bypasses the debounce. */
-  static async writeNow(ids: number[]) {
+  /** Explicit entry point used by the menu; bypasses the debounce. */
+  static async writeNow(ids: number[]): Promise<Report> {
     if (this.timer !== undefined) {
       clearTimeout(this.timer);
       this.timer = undefined;
     }
-    // A manual command is an explicit user request; honour it even if the
-    // automatic writer is switched off or shutting down.
     this.stopping = false;
-    // Drop queued automatic work for the same items so they are not written
-    // twice.
     for (const id of ids) {
       this.pending.delete(id);
     }
-    await this.run(ids);
+    return this.run(ids);
   }
 
   static cancelPending() {
@@ -154,61 +182,96 @@ export class PdfXmlFactory {
   }
 
   private static async drain() {
-    if (this.stopping || !this.pending.size) {
-      return;
-    }
-    // A worker is already busy; it re-schedules itself when it finishes.
-    if (this.running) {
+    if (this.stopping || !this.pending.size || this.running) {
       return;
     }
     const ids = Array.from(this.pending).slice(0, MAX_BATCH);
     for (const id of ids) {
       this.pending.delete(id);
     }
-    await this.run(ids);
-    // Anything that arrived while we worked is handled on the next tick of the
-    // debounce timer, never in a tight loop.
+    const report = await this.run(ids);
+    // Automatic writes stay quiet unless something went wrong.
+    if (report.failed && report.errors.length) {
+      notify(`Write PDF XML failed: ${report.errors[0]}`);
+    } else if (report.written) {
+      Zotero.debug(`${config.addonName}: auto-wrote ${report.written} PDF(s)`);
+    }
     this.scheduleFlush();
   }
 
-  private static async run(ids: number[]) {
+  private static async run(ids: number[]): Promise<Report> {
+    const report = emptyReport();
     if (!ids.length || this.stopping) {
-      return;
+      return report;
     }
     if (this.running) {
-      // Queue behind the active worker rather than running two at once.
       for (const id of ids) {
         this.pending.add(id);
       }
       this.scheduleFlush();
-      return;
+      return report;
     }
     this.running = true;
-    const stats = { written: 0, unchanged: 0, skipped: 0, failed: 0 };
     try {
       const items = await Zotero.Items.getAsync(ids);
       for (const item of items) {
         if (this.stopping) {
           break;
         }
-        const result = await this.writeItem(item as Zotero.Item);
-        stats[result] += 1;
-        // Hand the main thread back between documents so the UI keeps
-        // painting even for large batches.
+        let result: Result;
+        try {
+          result = await this.writeItem(item as Zotero.Item, report);
+        } catch (e) {
+          result = "failed";
+          report.errors.push(this.describe(e));
+        }
+        this.count(report, result);
         await Zotero.Promise.delay(0);
       }
     } catch (e) {
+      report.failed++;
+      report.errors.push(this.describe(e));
       Zotero.logError(e as Error);
     } finally {
       this.running = false;
-      if (stats.written || stats.failed || stats.skipped) {
-        Zotero.debug(
-          `${config.addonName}: ${stats.written} PDF(s) updated, ` +
-            `${stats.unchanged} already up to date, ${stats.skipped} skipped, ` +
-            `${stats.failed} failed`,
-        );
-      }
+      Zotero.debug(
+        `${config.addonName}: ${report.written} written, ${report.unchanged} unchanged, ` +
+          `${report.noAttachment} without PDF, ${report.noFile} file missing, ` +
+          `${report.encrypted} encrypted, ${report.failed} failed` +
+          (report.errors.length ? ` — ${report.errors.join("; ")}` : ""),
+      );
     }
+    return report;
+  }
+
+  private static count(report: Report, result: Result) {
+    switch (result) {
+      case "written":
+        report.written++;
+        break;
+      case "unchanged":
+        report.unchanged++;
+        break;
+      case "no-attachment":
+        report.noAttachment++;
+        break;
+      case "no-file":
+        report.noFile++;
+        break;
+      case "encrypted":
+        report.encrypted++;
+        break;
+      case "failed":
+        report.failed++;
+        break;
+    }
+  }
+
+  private static describe(e: unknown): string {
+    if (e instanceof Error) {
+      return e.message;
+    }
+    return String(e);
   }
 
   /* ------------------------------------------------------------------ *
@@ -217,39 +280,40 @@ export class PdfXmlFactory {
 
   private static async writeItem(
     item: Zotero.Item,
-  ): Promise<"written" | "unchanged" | "skipped" | "failed"> {
+    report: Report,
+  ): Promise<Result> {
     if (!item || !item.isRegularItem() || item.deleted) {
-      return "skipped";
+      return "unchanged";
     }
 
-    const title = ((item.getField("title") as string) || "").trim();
-    const author = ((item.getField("firstCreator") as string) || "").trim();
+    const title = String(item.getField("title") ?? "").trim();
+    const author = String(item.getField("firstCreator") ?? "").trim();
 
-    let attachments: Zotero.Item[];
+    let attachments: Zotero.Item[] = [];
     try {
-      const best = await item.getBestAttachments();
-      attachments = (best || []).filter(
-        (att) =>
-          att.isPDFAttachment?.() ||
-          att.attachmentContentType === "application/pdf",
-      );
+      // `getBestAttachments` is DB-backed and only returns real child items.
+      attachments = ((await item.getBestAttachments?.()) ??
+        []) as Zotero.Item[];
     } catch (e) {
-      Zotero.logError(e as Error);
-      return "failed";
+      report.errors.push(`${item.id}: ${this.describe(e)}`);
     }
-    if (!attachments.length) {
-      return "skipped";
+    const pdfs = attachments.filter(
+      (att) =>
+        att &&
+        (att.isPDFAttachment?.() ||
+          att.attachmentContentType === "application/pdf"),
+    );
+    if (!pdfs.length) {
+      return "no-attachment";
     }
 
-    let outcome: "written" | "unchanged" | "skipped" | "failed" = "skipped";
-    for (const att of attachments) {
-      const result = await this.writeAttachment(att, title, author);
-      if (result === "failed") {
-        outcome = "failed";
-      } else if (result === "written" && outcome !== "failed") {
+    let outcome: Result = "unchanged";
+    for (const att of pdfs) {
+      const result = await this.writeAttachment(att, title, author, report);
+      if (result === "written") {
         outcome = "written";
-      } else if (result === "unchanged" && outcome === "skipped") {
-        outcome = "unchanged";
+      } else if (outcome === "unchanged" && result !== "unchanged") {
+        outcome = result;
       }
     }
     return outcome;
@@ -259,18 +323,21 @@ export class PdfXmlFactory {
     att: Zotero.Item,
     title: string,
     author: string,
-  ): Promise<"written" | "unchanged" | "skipped" | "failed"> {
+    report: Report,
+  ): Promise<Result> {
     let path: string | false | undefined;
     try {
       path = await att.getFilePathAsync();
     } catch (e) {
-      Zotero.logError(e as Error);
+      report.errors.push(`attachment ${att.id}: ${this.describe(e)}`);
       return "failed";
     }
-    // Stored, linked and sync-only-relevant attachments all resolve, or fail,
-    // through getFilePathAsync(); false means "no local file right now".
     if (!path) {
-      return "skipped";
+      // Stored-but-not-downloaded, or a linked file that moved.
+      Zotero.debug(
+        `${config.addonName}: attachment ${att.id} has no local file`,
+      );
+      return "no-file";
     }
 
     let pdfDoc: PDFDocument;
@@ -279,15 +346,18 @@ export class PdfXmlFactory {
       pdfDoc = await PDFDocument.load(bytes, { updateMetadata: true });
     } catch (e) {
       if (e instanceof EncryptedPDFError) {
-        // Encrypted PDFs cannot be rewritten; ignore them silently.
-        return "skipped";
+        // Publisher PDFs are frequently encrypted. Metadata is encrypted too,
+        // so a rewrite is not possible; report it rather than hiding it.
+        Zotero.debug(`${config.addonName}: attachment ${att.id} is encrypted`);
+        return "encrypted";
       }
+      report.errors.push(`attachment ${att.id}: ${this.describe(e)}`);
       Zotero.logError(e as Error);
       return "failed";
     }
 
-    const currentTitle = (pdfDoc.getTitle() || "").trim();
-    const currentAuthor = (pdfDoc.getAuthor() || "").trim();
+    const currentTitle = (pdfDoc.getTitle() ?? "").trim();
+    const currentAuthor = (pdfDoc.getAuthor() ?? "").trim();
     if (
       (!title || currentTitle === title) &&
       (!author || currentAuthor === author)
@@ -304,37 +374,39 @@ export class PdfXmlFactory {
       }
       const bytes = await pdfDoc.save();
       await this.writeFileBytes(path, bytes);
+      Zotero.debug(`${config.addonName}: wrote attachment ${att.id} (${path})`);
       return "written";
     } catch (e) {
+      report.errors.push(`attachment ${att.id}: ${this.describe(e)}`);
       Zotero.logError(e as Error);
       return "failed";
     }
   }
 
   /* ------------------------------------------------------------------ *
-   * File helpers (IOUtils when available, Zotero.File as fallback)
+   * File helpers
    * ------------------------------------------------------------------ */
 
   /**
-   * Resolve Mozilla's IOUtils. It is a plain global in chrome scopes, but the
-   * plugin runs inside a sandbox, so fall back to the main window's copy.
+   * Resolve Mozilla's IOUtils. Inside an XPI the plugin runs from a jar: URI and
+   * `IOUtils` is not always reachable from the sandbox, so several fallbacks are
+   * tried in order of preference.
    */
   private static getIOUtils(): any {
-    try {
-      const fromGlobal = (globalThis as any).IOUtils;
-      if (fromGlobal?.read) {
-        return fromGlobal;
+    const candidates: Array<() => any> = [
+      () => (globalThis as any).IOUtils,
+      () => (Zotero.getMainWindow() as any)?.IOUtils,
+      () => (Zotero as any).IOUtils,
+    ];
+    for (const get of candidates) {
+      try {
+        const io = get();
+        if (io?.read && io?.write) {
+          return io;
+        }
+      } catch (e) {
+        /* try the next source */
       }
-    } catch (e) {
-      /* fall through */
-    }
-    try {
-      const win: any = Zotero.getMainWindow();
-      if (win?.IOUtils?.read) {
-        return win.IOUtils;
-      }
-    } catch (e) {
-      /* fall through */
     }
     return undefined;
   }
@@ -344,8 +416,7 @@ export class PdfXmlFactory {
     if (io?.read) {
       return (await io.read(path)) as Uint8Array;
     }
-    // `getBinaryContentsAsync` returns a byte-string; converting it once here is
-    // still far cheaper than the previous ascii round-trip through Buffer.
+    // Fallback for older/newer platforms without a reachable IOUtils.
     const data = (await Zotero.File.getBinaryContentsAsync(path)) as string;
     const bytes = new Uint8Array(data.length);
     for (let i = 0; i < data.length; i++) {
@@ -357,7 +428,7 @@ export class PdfXmlFactory {
   private static async writeFileBytes(path: string, bytes: Uint8Array) {
     const io = this.getIOUtils();
     if (io?.write) {
-      // Atomic write: keep the original intact if we die mid-write.
+      // Atomic write: the original stays intact if we die mid-write.
       await io.write(path, bytes, {
         tmpPath: `${path}.${config.addonRef}.tmp`,
       });
@@ -371,7 +442,7 @@ export class PdfXmlFactory {
   }
 
   /* ------------------------------------------------------------------ *
-   * Preferences / UI helpers
+   * Preferences
    * ------------------------------------------------------------------ */
 
   private static isAutoWriteEnabled(): boolean {
@@ -386,10 +457,34 @@ export class PdfXmlFactory {
     return Number.isFinite(value) && value >= 0 ? value : DEFAULT_DEBOUNCE_MS;
   }
 
-  /** Best-effort, non-blocking status toast. Never throws. */
-  static notify(lines: ProgressLine[]) {
-    for (const line of lines) {
-      notify(line.text);
+  /** Human-readable one-line summary of a batch, for the menu command. */
+  static summarize(report: Report): string {
+    const parts: string[] = [];
+    if (report.written) {
+      parts.push(`${report.written} updated`);
     }
+    if (report.unchanged) {
+      parts.push(`${report.unchanged} already current`);
+    }
+    if (report.noAttachment) {
+      parts.push(`${report.noAttachment} without PDF`);
+    }
+    if (report.noFile) {
+      parts.push(`${report.noFile} file missing`);
+    }
+    if (report.encrypted) {
+      parts.push(`${report.encrypted} encrypted`);
+    }
+    if (report.failed) {
+      parts.push(`${report.failed} failed`);
+    }
+    if (!parts.length) {
+      return "nothing to do";
+    }
+    const summary = parts.join(", ");
+    if (report.errors.length) {
+      return `${summary} — ${report.errors[0]}`;
+    }
+    return summary;
   }
 }
