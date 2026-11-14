@@ -71,6 +71,12 @@ A practical usage is to use the exported PDFs in another tool, like creating emb
 
 ### Troubleshooting
 
+- **Verify the plugin loaded.** Open **Help → Debug Output Logging → View
+  Output** and look for these lines, which are printed unconditionally:
+  `Write PDF XML: bundle loaded`, `item menu registered (…)`, `startup complete`.
+  If none appear, Zotero never started the plugin (check the version ceiling
+  below). If `bundle loaded` appears but nothing else does, the following line
+  reports what failed.
 - **The plugin disappears after restarting Zotero.** The addon keeps an
   `update_url` in its manifest. If that URL still points at a build that does
   not support your Zotero version (the upstream Zotero 7 release, for example),

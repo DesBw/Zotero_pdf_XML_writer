@@ -1,6 +1,6 @@
 import { config } from "../../package.json";
 import { PDFDocument, EncryptedPDFError } from "pdf-lib";
-import { getString } from "../utils/locale";
+import { notify } from "./zoteroAPI";
 
 /**
  * Default coalescing window. Zotero emits several `item` `modify`
@@ -86,17 +86,6 @@ export class PdfXmlFactory {
       Zotero.Notifier.unregisterObserver(this.notifierID);
       this.notifierID = undefined;
     }
-  }
-
-  static registerPrefs() {
-    const prefOptions = {
-      pluginID: config.addonID,
-      src: rootURI + "chrome/content/preferences.xhtml",
-      label: getString("prefs-title"),
-      image: `chrome://${config.addonRef}/content/icons/favicon.png`,
-      defaultXUL: true,
-    };
-    ztoolkit.PreferencePane.register(prefOptions);
   }
 
   /* ------------------------------------------------------------------ *
@@ -326,8 +315,32 @@ export class PdfXmlFactory {
    * File helpers (IOUtils when available, Zotero.File as fallback)
    * ------------------------------------------------------------------ */
 
+  /**
+   * Resolve Mozilla's IOUtils. It is a plain global in chrome scopes, but the
+   * plugin runs inside a sandbox, so fall back to the main window's copy.
+   */
+  private static getIOUtils(): any {
+    try {
+      const fromGlobal = (globalThis as any).IOUtils;
+      if (fromGlobal?.read) {
+        return fromGlobal;
+      }
+    } catch (e) {
+      /* fall through */
+    }
+    try {
+      const win: any = Zotero.getMainWindow();
+      if (win?.IOUtils?.read) {
+        return win.IOUtils;
+      }
+    } catch (e) {
+      /* fall through */
+    }
+    return undefined;
+  }
+
   private static async readFileBytes(path: string): Promise<Uint8Array> {
-    const io = (globalThis as any).IOUtils;
+    const io = this.getIOUtils();
     if (io?.read) {
       return (await io.read(path)) as Uint8Array;
     }
@@ -342,7 +355,7 @@ export class PdfXmlFactory {
   }
 
   private static async writeFileBytes(path: string, bytes: Uint8Array) {
-    const io = (globalThis as any).IOUtils;
+    const io = this.getIOUtils();
     if (io?.write) {
       // Atomic write: keep the original intact if we die mid-write.
       await io.write(path, bytes, {
@@ -374,19 +387,9 @@ export class PdfXmlFactory {
   }
 
   /** Best-effort, non-blocking status toast. Never throws. */
-  static notify(lines: ProgressLine[], header = config.addonName) {
-    try {
-      const pw = new ztoolkit.ProgressWindow(header, {
-        closeOnClick: true,
-        closeTime: 4000,
-      });
-      for (const line of lines) {
-        pw.createLine({ text: line.text });
-      }
-      pw.show();
-    } catch (e) {
-      Zotero.debug(`${config.addonName}: could not show progress window`);
-      Zotero.logError(e as Error);
+  static notify(lines: ProgressLine[]) {
+    for (const line of lines) {
+      notify(line.text);
     }
   }
 }

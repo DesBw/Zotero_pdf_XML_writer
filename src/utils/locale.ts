@@ -11,14 +11,19 @@ function initLocale() {
   try {
     const LocalizationCtor =
       typeof Localization === "undefined"
-        ? ztoolkit.getGlobal("Localization")
+        ? (Zotero.getMainWindow() as any)?.Localization
         : Localization;
+    if (!LocalizationCtor) {
+      throw new Error("Localization constructor unavailable");
+    }
     const l10n = new LocalizationCtor([`${config.addonRef}-addon.ftl`], true);
     addon.data.locale = {
       current: l10n,
     };
   } catch (e) {
-    Zotero.logError(e as Error);
+    // Localisation is cosmetic: never treat this as an error, and never let it
+    // stop startup. Labels fall back to their English defaults.
+    Zotero.debug(`${config.addonName}: locale unavailable (${e})`);
     addon.data.locale = { current: undefined };
   }
 }
