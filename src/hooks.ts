@@ -1,10 +1,29 @@
 import { PdfXmlFactory } from "./modules/pdfXml";
 import { config } from "../package.json";
-import { initLocale } from "./utils/locale";
+import { getString, initLocale } from "./utils/locale";
 import { registerPrefsScripts } from "./modules/preferenceScript";
-import { createZToolkit } from "./utils/ztoolkit";
 
-const MENU_ID = `zotero-itemmenu-${config.addonRef}-write-pdf-xml`;
+/** Id used for the official Zotero 8+ menu API. */
+const MENU_ID = `${config.addonRef}-write-pdf-xml`;
+/** Legacy DOM id, used only by the pre-Zotero-8 fallback path. */
+const LEGACY_MENU_ID = `zotero-itemmenu-${MENU_ID}`;
+const MENU_ICON = `chrome://${config.addonRef}/content/icons/favicon@0.5x.png`;
+const MENU_FALLBACK_LABEL = "Write PDF XML";
+
+/** True when the official menu API (Zotero 8+) is available. */
+function hasMenuManager(): boolean {
+  return typeof (Zotero as any).MenuManager?.registerMenu === "function";
+}
+
+/** Localised menu label, with a hard-coded fallback. */
+function menuLabel(): string {
+  const value = getString("write-pdf-xml-menu");
+  // getString returns the message id when the string is missing.
+  if (!value || value.startsWith(`${config.addonRef}-`)) {
+    return MENU_FALLBACK_LABEL;
+  }
+  return value;
+}
 
 async function onStartup() {
   await Promise.all([
@@ -18,55 +37,168 @@ async function onStartup() {
   PdfXmlFactory.registerPrefs();
   PdfXmlFactory.registerNotifier();
 
-  // `onStartup` runs once per session; register UI for every window that is
-  // already open, then rely on `onMainWindowLoad` for later windows.
+  registerMenus();
+}
+
+/**
+ * Register the context menu (and a Tools menu entry as a fallback entry point).
+ *
+ * Zotero 8+ replaced per-window DOM injection with `Zotero.MenuManager`. Items
+ * injected the old way are not reliably kept by Zotero 10's rebuilt item menu,
+ * so the official API is used whenever it is available.
+ */
+function registerMenus() {
+  if (hasMenuManager()) {
+    registerMenuManagerMenus();
+    return;
+  }
+  // Pre-Zotero-8 fallback: inject into each open window's popup.
   for (const win of Zotero.getMainWindows()) {
     if (win && !win.closed) {
-      await onMainWindowLoad(win as Window);
+      injectLegacyMenuItem(win as Window);
     }
   }
 }
 
+function registerMenuManagerMenus() {
+  const manager = (Zotero as any).MenuManager;
+
+  // Re-registering the same menuID is an error on some versions, so clear it.
+  try {
+    manager.unregisterMenu?.(MENU_ID);
+    manager.unregisterMenu?.(`${MENU_ID}-tools`);
+  } catch (e) {
+    Zotero.debug(`${config.addonName}: could not clear old menus: ${e}`);
+  }
+
+  try {
+    const id = manager.registerMenu({
+      menuID: MENU_ID,
+      pluginID: config.addonID,
+      target: "main/library/item",
+      menus: [
+        {
+          menuType: "menuitem",
+          icon: MENU_ICON,
+          // The label is set here rather than via l10nID: if plugin FTL strings
+          // are unavailable the item would otherwise render with no label.
+          onShowing: (event: Event, context: any) => {
+            applyMenuState(context, "item");
+          },
+          onCommand: (event: Event, context: any) => {
+            void onWritePdfXmlCommand(context?.items);
+          },
+        },
+      ],
+    });
+    Zotero.debug(`${config.addonName}: item menu registered (${id})`);
+  } catch (e) {
+    Zotero.logError(e as Error);
+    Zotero.debug(`${config.addonName}: item menu registration failed: ${e}`);
+  }
+
+  try {
+    manager.registerMenu({
+      menuID: `${MENU_ID}-tools`,
+      pluginID: config.addonID,
+      target: "main/menubar/tools",
+      menus: [
+        {
+          menuType: "menuitem",
+          icon: MENU_ICON,
+          onShowing: (event: Event, context: any) => {
+            applyMenuState(context, "tools");
+          },
+          onCommand: (event: Event, context: any) => {
+            void onWritePdfXmlCommand(context?.items);
+          },
+        },
+      ],
+    });
+  } catch (e) {
+    Zotero.logError(e as Error);
+  }
+}
+
 /**
- * Called once per main window (including every re-open of the window).
- * Registration must be idempotent: `onMainWindowLoad` can be reached both from
- * `onStartup` and from the bootstrap window listener.
+ * Sets the label and state of a menu built by `Zotero.MenuManager`.
+ *
+ * - "item": context menu — hidden and disabled unless a regular item is selected.
+ * - "tools": menubar entry — always available, falls back to the pane selection.
+ *
+ * The label is applied as an attribute rather than through `l10nID`, because a
+ * menu item whose FTL string cannot be resolved renders with no text at all.
+ */
+function applyMenuState(context: any, mode: "item" | "tools") {
+  try {
+    context?.menuElem?.setAttribute("label", menuLabel());
+    if (mode === "item") {
+      const usable = selectedRegularItems(context?.items).length > 0;
+      context?.setEnabled?.(usable);
+      context?.setVisible?.(usable);
+    }
+  } catch (e) {
+    Zotero.logError(e as Error);
+  }
+}
+
+/** Pre-Zotero-8 menu injection, kept as a fallback. */
+function injectLegacyMenuItem(win: Window) {
+  try {
+    const doc = win.document;
+    // Let ztoolkit build its own instance for this window.
+    if (!doc.getElementById(LEGACY_MENU_ID) && ztoolkit?.Menu?.register) {
+      ztoolkit.Menu.register("item", {
+        tag: "menuitem",
+        id: LEGACY_MENU_ID,
+        label: menuLabel(),
+        icon: MENU_ICON,
+        commandListener: () => {
+          void onWritePdfXmlCommand();
+        },
+      });
+    }
+  } catch (e) {
+    Zotero.logError(e as Error);
+  }
+}
+
+/** Only regular, non-deleted items can be written. */
+function selectedRegularItems(items: unknown): Zotero.Item[] {
+  if (!Array.isArray(items)) {
+    return [];
+  }
+  return (items as Zotero.Item[]).filter(
+    (item) => item && item.isRegularItem?.() && !item.deleted,
+  );
+}
+
+/**
+ * Called once per main window (including every re-open of the window) by the
+ * bootstrap window listener. Only needed for the legacy menu path.
  */
 async function onMainWindowLoad(win: Window): Promise<void> {
-  const doc = win.document;
-
-  // Register the context menu item once per document.
-  if (!doc.getElementById(MENU_ID)) {
-    ztoolkit.Menu.register(
-      "item",
-      {
-        tag: "menuitem",
-        id: MENU_ID,
-        label: "Write PDF XML",
-        icon: `chrome://${config.addonRef}/content/icons/favicon@0.5x.png`,
-        commandListener: () => {
-          void onWritePdfXmlCommand(win);
-        },
-      },
-      "before",
-      (doc.querySelector("#zotero-itemmenu-separator") as XUL.Element) ??
-        undefined,
-    );
+  if (!hasMenuManager()) {
+    injectLegacyMenuItem(win);
   }
 }
 
 /**
- * Context-menu handler: writes immediately for the current selection and
- * reports the outcome, since the user explicitly asked for it.
+ * Writes immediately for the given selection and reports the outcome, since
+ * the user explicitly asked for it.
  */
-async function onWritePdfXmlCommand(win: Window) {
+async function onWritePdfXmlCommand(items?: Zotero.Item[]) {
   try {
-    const pane = (win as any).ZoteroPane ?? Zotero.getActiveZoteroPane();
-    const items = (pane?.getSelectedItems?.() ?? []) as Zotero.Item[];
-    if (!items.length) {
+    let selection = selectedRegularItems(items);
+    if (!selection.length) {
+      // Fall back to the pane selection (legacy path/entry points).
+      const pane = Zotero.getActiveZoteroPane();
+      selection = selectedRegularItems(pane?.getSelectedItems?.());
+    }
+    if (!selection.length) {
       return;
     }
-    const ids = items.map((item) => item.id);
+    const ids = selection.map((item) => item.id);
     await PdfXmlFactory.writeNow(ids);
     PdfXmlFactory.notify([
       { text: `Write PDF XML: processed ${ids.length} item(s)` },
@@ -77,10 +209,10 @@ async function onWritePdfXmlCommand(win: Window) {
 }
 
 async function onMainWindowUnload(win: Window): Promise<void> {
-  // Only tear down this window's UI; `ztoolkit` is global to the addon and
-  // unregisterAll() here would strip the menu from the other windows too.
+  // Zotero removes MenuManager menus itself; only the legacy injection needs
+  // manual cleanup.
   try {
-    win.document.getElementById(MENU_ID)?.remove();
+    win.document.getElementById(LEGACY_MENU_ID)?.remove();
   } catch (e) {
     // Window may already be gone.
   }
@@ -89,7 +221,21 @@ async function onMainWindowUnload(win: Window): Promise<void> {
 
 function onShutdown(): void {
   PdfXmlFactory.unregisterNotifier();
-  ztoolkit.unregisterAll();
+  if (hasMenuManager()) {
+    const manager = (Zotero as any).MenuManager;
+    for (const id of [MENU_ID, `${MENU_ID}-tools`]) {
+      try {
+        manager.unregisterMenu?.(id);
+      } catch (e) {
+        Zotero.debug(`${config.addonName}: could not unregister ${id}: ${e}`);
+      }
+    }
+  }
+  try {
+    ztoolkit?.unregisterAll?.();
+  } catch (e) {
+    Zotero.debug(`${config.addonName}: toolkit cleanup failed: ${e}`);
+  }
   addon.data.dialog?.window?.close();
   // Remove addon object
   addon.data.alive = false;
