@@ -1,5 +1,5 @@
 {
-  "name": "zotero-pdf-metadata",
+  "name": "zotero-pdf-xml",
   "version": "0.6.0",
   "description": "Writes Zotero item metadata into the XML metadata of attached PDFs",
   "config": {
@@ -8,8 +8,8 @@
     "addonRef": "pdf_xml",
     "addonInstance": "PDFXml",
     "prefsPrefix": "extensions.zotero.pdf_xml",
-    "releasepage": "https://github.com/DesBw/write_xml_metadata_to_PDF/releases/latest/download/zotero-pdf-metadata.xpi",
-    "updaterdf": "https://raw.githubusercontent.com/DesBw/write_xml_metadata_to_PDF/main/update.json"
+    "releasepage": "https://github.com/DesBw/Zotero_pdf_XML_writer/releases/latest/download/zotero-pdf-xml.xpi",
+    "updaterdf": "https://raw.githubusercontent.com/DesBw/Zotero_pdf_XML_writer/main/update.json"
   },
   "main": "src/index.ts",
   "scripts": {
@@ -32,14 +32,14 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/franzbischoff/zotero-pdf-metadata.git"
+    "url": "git+https://github.com/DesBw/Zotero_pdf_XML_writer.git"
   },
   "author": "Francisco Bischoff",
   "license": "AGPL-3.0-or-later",
   "bugs": {
-    "url": "https://github.com/franzbischoff/zotero-pdf-metadata/issues"
+    "url": "https://github.com/DesBw/Zotero_pdf_XML_writer/issues"
   },
-  "homepage": "https://github.com/franzbischoff/zotero-pdf-metadata#readme",
+  "homepage": "https://github.com/DesBw/Zotero_pdf_XML_writer#readme",
   "dependencies": {
     "@types/react": "^18.2.39",
     "buffer": "^6.0.3",

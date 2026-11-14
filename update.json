@@ -4,7 +4,7 @@
       "updates": [
         {
           "version": "0.6.0",
-          "update_link": "https://github.com/DesBw/write_xml_metadata_to_PDF/releases/latest/download/zotero-pdf-metadata.xpi",
+          "update_link": "https://github.com/DesBw/Zotero_pdf_XML_writer/releases/latest/download/zotero-pdf-xml.xpi",
           "applications": {
             "zotero": {
               "strict_min_version": "7.0",

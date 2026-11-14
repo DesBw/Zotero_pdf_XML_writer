@@ -84,7 +84,7 @@ A practical usage is to use the exported PDFs in another tool, like creating emb
 
 ### From the pre-built `.xpi` file
 
-You can download the latest `.xpi` file from the [releases page](https://github.com/franzbischoff/zotero-pdf-metadata/releases/latest/download/zotero-pdf-metadata.xpi) and install it manually in Zotero. It will also auto-update when a new version is released.
+You can download the latest `.xpi` file from the [releases page](https://github.com/DesBw/Zotero_pdf_XML_writer/releases/latest/download/zotero-pdf-xml.xpi) and install it manually in Zotero. It will also auto-update when a new version is released.
 
 ### Build from Source
 
@@ -92,7 +92,7 @@ You can download the latest `.xpi` file from the [releases page](https://github.
 - Git clone the forked repo;
 - Enter the repo folder;
 - Run `npm install` to install dependencies then `npm run build` to build the plugin;
-- The `zotero-pdf-metadata.xpi` file will be generated in the `build` folder;
+- The `zotero-pdf-xml.xpi` file will be generated in the `build` folder;
 
 ## Next features
 
