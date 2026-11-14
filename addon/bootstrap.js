@@ -148,6 +148,78 @@ async function waitForZotero() {
   });
 }
 
+/**
+ * Copy a platform global onto the plugin's execution context.
+ *
+ * bootstrap.js is evaluated *inside* the plugin sandbox, so `IOUtils`,
+ * `Localization`, `setTimeout`, ... are plain identifiers there. They are read
+ * via a lookup table because a bare `globalThis[name]` does not see sandbox
+ * globals in all Gecko versions.
+ */
+function platformGlobals() {
+  const table = {};
+  // The identifiers below are resolved in the bootstrap sandbox scope. Any that
+  // do not exist throw, and are skipped.
+  const names = [
+    "IOUtils",
+    "PathUtils",
+    "Localization",
+    "ChromeUtils",
+    "Components",
+    "Cc",
+    "Ci",
+    "Cu",
+    "Cr",
+    "Blob",
+    "TextEncoder",
+    "TextDecoder",
+    "URL",
+  ];
+  for (const name of names) {
+    try {
+      table[name] = sandboxLookup(name);
+    } catch (e) {
+      /* not available on this version */
+    }
+  }
+  return table;
+}
+
+/** Resolve an identifier that exists in the enclosing (sandbox) scope. */
+function sandboxLookup(name) {
+  // eslint-disable-next-line no-unused-vars
+  switch (name) {
+    case "IOUtils":
+      return typeof IOUtils != "undefined" ? IOUtils : undefined;
+    case "PathUtils":
+      return typeof PathUtils != "undefined" ? PathUtils : undefined;
+    case "Localization":
+      return typeof Localization != "undefined" ? Localization : undefined;
+    case "ChromeUtils":
+      return typeof ChromeUtils != "undefined" ? ChromeUtils : undefined;
+    case "Components":
+      return typeof Components != "undefined" ? Components : undefined;
+    case "Cc":
+      return typeof Cc != "undefined" ? Cc : undefined;
+    case "Ci":
+      return typeof Ci != "undefined" ? Ci : undefined;
+    case "Cu":
+      return typeof Cu != "undefined" ? Cu : undefined;
+    case "Cr":
+      return typeof Cr != "undefined" ? Cr : undefined;
+    case "Blob":
+      return typeof Blob != "undefined" ? Blob : undefined;
+    case "TextEncoder":
+      return typeof TextEncoder != "undefined" ? TextEncoder : undefined;
+    case "TextDecoder":
+      return typeof TextDecoder != "undefined" ? TextDecoder : undefined;
+    case "URL":
+      return typeof URL != "undefined" ? URL : undefined;
+    default:
+      return undefined;
+  }
+}
+
 function install(data, reason) {}
 
 async function startup({ id, version, resourceURI, rootURI }, reason) {
@@ -176,12 +248,49 @@ async function startup({ id, version, resourceURI, rootURI }, reason) {
     /**
      * Globals for the plugin sandbox. `_globalThis` is its root object.
      */
-    const ctx = {
-      rootURI,
-      Services,
-      Zotero,
-    };
+    // The plugin bundle is executed with `ctx` as its global object. A plain
+    // object does NOT inherit the sandbox globals (IOUtils, Localization,
+    // setTimeout, ...), so the ones the plugin relies on are copied in
+    // explicitly. Without this, file I/O silently falls back to APIs that may
+    // not exist on newer Zotero versions.
+    const ctx = Object.create(null);
+    // `bootstrap.js` is evaluated inside the plugin sandbox, so these
+    // identifiers resolve against the real platform globals. They are copied
+    // onto `ctx` because `loadSubScript()` below uses `ctx` as the script's
+    // global object, and a plain object inherits nothing.
+    const globals = platformGlobals();
+    for (const name of Object.keys(globals)) {
+      if (typeof globals[name] != "undefined") {
+        ctx[name] = globals[name];
+      }
+    }
+    // Timer functions are plain sandbox globals, not objects.
+    for (const name of [
+      "setTimeout",
+      "clearTimeout",
+      "setInterval",
+      "clearInterval",
+    ]) {
+      try {
+        // eslint-disable-next-line no-eval
+        const fn = (0, eval)(name);
+        if (typeof fn == "function") {
+          ctx[name] = fn;
+        }
+      } catch (e) {
+        /* not available */
+      }
+    }
+    ctx.rootURI = rootURI;
+    ctx.Services = Services;
+    ctx.Zotero = Zotero;
     ctx._globalThis = ctx;
+
+    const available = Object.keys(ctx).filter((k) => k != "_globalThis");
+    Zotero.debug(`[write-pdf-xml] plugin scope: ${available.join(", ")}`);
+    if (!ctx.IOUtils) {
+      Zotero.debug("[write-pdf-xml] IOUtils unavailable in plugin scope");
+    }
 
     Services.scriptloader.loadSubScript(
       `${rootURI}/chrome/content/scripts/__addonRef__.js`,

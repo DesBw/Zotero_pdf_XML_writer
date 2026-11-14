@@ -83,9 +83,16 @@ A practical usage is to use the exported PDFs in another tool, like creating emb
   Zotero replaces/refuses it on the next start. `npm run build` now generates
   `update.json`/`manifest.json` pointing at this repository, so publish the
   built `.xpi` as a release there before relying on auto-updates.
-- **Diagnostics.** Zotero writes plugin errors to **Help → Debug Output
-  Logging → View Output**, and `Write PDF XML:` lines report how many PDFs were
-  written, skipped or failed.
+- **Diagnostics.** Turn on **Help → Debug Output Logging → View Output** and
+  filter for `Write PDF XML:`. Every run reports a summary such as
+  `2 written, 1 unchanged, 1 without PDF, 1 file missing, 0 encrypted, 1 failed`,
+  plus a per-attachment line (`wrote attachment 101 (/path/file.pdf)`) or the
+  exact reason it was skipped. The right-click command also shows this summary
+  as a popup.
+- **Common non-writes.** _file missing_ means the attachment has no local file
+  (not downloaded, or a linked file that moved). _encrypted_ means the PDF
+  carries an `/Encrypt` dictionary, which is common in publisher PDFs — their
+  metadata cannot be rewritten. _without PDF_ means the item has no PDF child.
 
 ## Installation
 
