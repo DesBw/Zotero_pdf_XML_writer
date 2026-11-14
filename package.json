@@ -1,6 +1,6 @@
 {
   "name": "zotero-pdf-xml",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Writes Zotero item metadata into the XML metadata of attached PDFs",
   "config": {
     "addonName": "Write PDF XML",
@@ -41,10 +41,7 @@
   },
   "homepage": "https://github.com/DesBw/Zotero_pdf_XML_writer#readme",
   "dependencies": {
-    "@types/react": "^18.2.39",
-    "buffer": "^6.0.3",
-    "pdf-lib": "^1.17.1",
-    "zotero-plugin-toolkit": "^2.3.10"
+    "pdf-lib": "^1.17.1"
   },
   "devDependencies": {
     "@tsconfig/recommended": "^1.0.3",

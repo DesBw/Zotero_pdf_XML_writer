@@ -2,6 +2,7 @@ import { PdfXmlFactory } from "./modules/pdfXml";
 import { config } from "../package.json";
 import { getString, initLocale } from "./utils/locale";
 import { registerPrefsScripts } from "./modules/preferenceScript";
+import { registerPrefs } from "./modules/zoteroAPI";
 
 /** Id used for the official Zotero 8+ menu API. */
 const MENU_ID = `${config.addonRef}-write-pdf-xml`;
@@ -34,10 +35,13 @@ async function onStartup() {
   initLocale();
 
   PdfXmlFactory.enable();
-  PdfXmlFactory.registerPrefs();
+  registerPrefs();
   PdfXmlFactory.registerNotifier();
 
   registerMenus();
+
+  addon.data.initialized = true;
+  Zotero.debug(`${config.addonName}: startup complete`);
 }
 
 /**
@@ -142,22 +146,26 @@ function applyMenuState(context: any, mode: "item" | "tools") {
   }
 }
 
-/** Pre-Zotero-8 menu injection, kept as a fallback. */
+/**
+ * Pre-Zotero-8 menu injection, kept as a fallback: builds the menuitem by hand
+ * rather than through the old toolkit Menu manager.
+ */
 function injectLegacyMenuItem(win: Window) {
   try {
-    const doc = win.document;
-    // Let ztoolkit build its own instance for this window.
-    if (!doc.getElementById(LEGACY_MENU_ID) && ztoolkit?.Menu?.register) {
-      ztoolkit.Menu.register("item", {
-        tag: "menuitem",
-        id: LEGACY_MENU_ID,
-        label: menuLabel(),
-        icon: MENU_ICON,
-        commandListener: () => {
-          void onWritePdfXmlCommand();
-        },
-      });
+    const doc = (win as any).document;
+    const popup: any = doc?.querySelector?.("#zotero-itemmenu");
+    if (!popup || doc.getElementById(LEGACY_MENU_ID)) {
+      return;
     }
+    const item: any = doc.createXULElement("menuitem");
+    item.id = LEGACY_MENU_ID;
+    item.setAttribute("label", menuLabel());
+    item.setAttribute("class", "menuitem-iconic");
+    item.style.setProperty("list-style-image", `url(${MENU_ICON})`);
+    item.addEventListener("command", () => {
+      void onWritePdfXmlCommand();
+    });
+    popup.appendChild(item);
   } catch (e) {
     Zotero.logError(e as Error);
   }
@@ -231,12 +239,7 @@ function onShutdown(): void {
       }
     }
   }
-  try {
-    ztoolkit?.unregisterAll?.();
-  } catch (e) {
-    Zotero.debug(`${config.addonName}: toolkit cleanup failed: ${e}`);
-  }
-  addon.data.dialog?.window?.close();
+  addon.data.dialog?.window?.close?.();
   // Remove addon object
   addon.data.alive = false;
   delete Zotero[config.addonInstance];
