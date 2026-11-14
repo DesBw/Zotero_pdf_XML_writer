@@ -7,7 +7,7 @@
           "update_link": "https://github.com/DesBw/Zotero_pdf_XML_writer/releases/latest/download/zotero-pdf-xml.xpi",
           "applications": {
             "zotero": {
-              "strict_min_version": "7.0",
+              "strict_min_version": "6.999",
               "strict_max_version": "10.*"
             }
           }

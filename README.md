@@ -100,6 +100,24 @@ You can download the latest `.xpi` file from the [releases page](https://github.
 - [ ] Add a setting to choose which fields to update;
 - [ ] Add an option to update all attachments in a collection;
 
+## Icon
+
+`assets/icon.svg` is the source for both packaged icons
+(`addon/chrome/content/icons/favicon.png` at 32 px and
+`favicon@0.5x.png` at 16 px). Re-render them after editing the SVG:
+
+```bash
+npm i --no-save @resvg/resvg-js   # if not already installed
+node -e '
+const { Resvg } = require("@resvg/resvg-js");
+const fs = require("fs");
+const svg = fs.readFileSync("assets/icon.svg", "utf8");
+for (const [size, out] of [[32, "favicon.png"], [16, "favicon@0.5x.png"]]) {
+  fs.writeFileSync("addon/chrome/content/icons/" + out,
+    new Resvg(svg, { fitTo: { mode: "width", value: size } }).render().asPng());
+}'
+```
+
 ## Disclaimer
 
 Use this code under AGPL. No warranties are provided. Keep the laws of your locality in mind!
